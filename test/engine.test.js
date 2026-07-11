@@ -5,7 +5,7 @@
  */
 import {
   initialBoard, legalMoves, applyMove, undoMove, sideOf, opposite,
-  inCheck, status, RED, BLACK, idx, describeMove,
+  inCheck, status, RED, BLACK, idx, describeMove, perpetualCheckOffender,
 } from '../shared/xiangqi.js';
 
 let failures = 0;
@@ -134,6 +134,54 @@ console.timeEnd('perft');
   const b = initialBoard();
   check('describe 炮二平五', describeMove(b, idx(7, 7), idx(7, 4)), '炮二平五');
   check('describe 马8进7 (black)', describeMove(b, idx(0, 7), idx(2, 6)), '马8进7');
+}
+
+// perpetualCheckOffender: repeated positions must not be flattened into an
+// automatic draw when one side has been checking continuously (长将判负).
+{
+  // Unilateral perpetual check: red checks every one of its moves across
+  // the repeated span, black never does -> red is the offender.
+  const posLog = [
+    { key: 'A', mover: null, isCheck: false }, // seed
+    { key: 'B', mover: RED, isCheck: true },
+    { key: 'A', mover: BLACK, isCheck: false }, // 2nd occurrence of A
+    { key: 'B', mover: RED, isCheck: true },
+    { key: 'A', mover: BLACK, isCheck: false }, // 3rd occurrence of A
+  ];
+  check('perpetual check: unilateral red offender', perpetualCheckOffender(posLog, 'A'), RED);
+}
+{
+  // Mutual perpetual check: both sides check every move -> genuine draw.
+  const posLog = [
+    { key: 'A', mover: null, isCheck: false },
+    { key: 'B', mover: RED, isCheck: true },
+    { key: 'A', mover: BLACK, isCheck: true },
+    { key: 'B', mover: RED, isCheck: true },
+    { key: 'A', mover: BLACK, isCheck: true },
+  ];
+  check('perpetual check: mutual checking is a draw', perpetualCheckOffender(posLog, 'A'), null);
+}
+{
+  // Quiet repetition: neither side ever checks -> genuine draw.
+  const posLog = [
+    { key: 'A', mover: null, isCheck: false },
+    { key: 'B', mover: RED, isCheck: false },
+    { key: 'A', mover: BLACK, isCheck: false },
+    { key: 'B', mover: RED, isCheck: false },
+    { key: 'A', mover: BLACK, isCheck: false },
+  ];
+  check('perpetual check: quiet repetition is a draw', perpetualCheckOffender(posLog, 'A'), null);
+}
+{
+  // Red checked inconsistently (missed a move) -> not continuous, no foul.
+  const posLog = [
+    { key: 'A', mover: null, isCheck: false },
+    { key: 'B', mover: RED, isCheck: true },
+    { key: 'A', mover: BLACK, isCheck: false },
+    { key: 'B', mover: RED, isCheck: false },
+    { key: 'A', mover: BLACK, isCheck: false },
+  ];
+  check('perpetual check: inconsistent checking is not a foul', perpetualCheckOffender(posLog, 'A'), null);
 }
 
 console.log(failures === 0 ? '\nAll tests passed.' : `\n${failures} test(s) FAILED.`);

@@ -76,6 +76,8 @@
         <div id="pvp-status" class="pvp-status"></div>
         <button class="secondary-btn" id="btn-cancel-match" hidden>取消匹配</button>
       </div>
+
+      <button class="feedback-link" id="btn-feedback">💬 意见反馈</button>
     </section>
 
     <!-- ===== 对局页 ===== -->
@@ -118,6 +120,7 @@
             <button class="ctrl-btn" id="btn-draw" hidden>求和</button>
             <button class="ctrl-btn danger" id="btn-resign">认输</button>
             <button class="ctrl-btn" id="btn-home">退出对局</button>
+            <button class="ctrl-btn" id="btn-feedback-game">意见反馈</button>
           </div>
         </aside>
       </div>
@@ -147,6 +150,23 @@
         </div>
       </div>
     </section>
+
+    <!-- 意见反馈遮罩（主页和对局页共用） -->
+    <div class="overlay" id="feedback-overlay" hidden>
+      <div class="overlay-card">
+        <div class="result-title" style="font-size:22px;">意见反馈</div>
+        <div class="result-sub" style="margin-bottom:14px;">游戏体验、bug、功能建议都欢迎，会直接发给开发者</div>
+        <textarea id="feedback-text" class="feedback-textarea" maxlength="2000" rows="5"
+                  placeholder="说说你的想法…"></textarea>
+        <input id="feedback-contact" class="feedback-contact" type="text" maxlength="200"
+               placeholder="你的联系方式（选填，方便回复你）">
+        <div class="overlay-actions">
+          <button class="primary-btn" id="btn-feedback-submit">提交反馈</button>
+          <button class="secondary-btn" id="btn-feedback-cancel">取消</button>
+        </div>
+        <div class="feedback-status" id="feedback-status"></div>
+      </div>
+    </div>
 
   </div>
   <script type="module" src="/js/main.js"></script>

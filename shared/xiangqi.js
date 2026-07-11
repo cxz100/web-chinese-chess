@@ -325,6 +325,43 @@ export function positionKey(board, sideToMove) {
   return s;
 }
 
+/**
+ * Classify a repeated position under the Chinese Xiangqi "no perpetual
+ * check" (不许长将) rule. A repeated position is only a genuine draw when
+ * neither side (or both sides equally) checked on every one of their own
+ * moves throughout the repeated span. If exactly one side delivered check
+ * on every single one of its moves across that span while the other side
+ * did not, that side committed 长将 and loses -- simple repetition must
+ * not be flattened into an automatic draw.
+ *
+ * (Perpetual chase of an undefended piece, 长捉, is a related foul under
+ * the full rule set but is not detected here -- see 维护手册.md.)
+ *
+ * @param posLog ordered per-ply log: { key, mover, isCheck }[], one entry
+ *   per move played plus a seed entry for the starting position (mover
+ *   null on the seed so it never counts toward either side).
+ * @param key the position key that has just recurred
+ * @returns the offending side (RED/BLACK), or null if it's a genuine draw
+ */
+export function perpetualCheckOffender(posLog, key) {
+  const idxs = [];
+  for (let i = 0; i < posLog.length; i++) {
+    if (posLog[i].key === key) idxs.push(i);
+  }
+  if (idxs.length < 2) return null;
+  const span = posLog.slice(idxs[0] + 1, idxs[idxs.length - 1] + 1);
+  if (span.length === 0) return null;
+  const alwaysChecks = (side) => {
+    const own = span.filter((m) => m.mover === side);
+    return own.length > 0 && own.every((m) => m.isCheck);
+  };
+  const redAlways = alwaysChecks(RED);
+  const blackAlways = alwaysChecks(BLACK);
+  if (redAlways && !blackAlways) return RED;
+  if (blackAlways && !redAlways) return BLACK;
+  return null;
+}
+
 /** Chinese notation-ish description of a move, for the move list UI. */
 const PIECE_NAMES = {
   K: '帅', A: '仕', B: '相', N: '马', R: '车', C: '炮', P: '兵',

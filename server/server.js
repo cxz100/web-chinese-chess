@@ -10,9 +10,10 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
+import nodemailer from 'nodemailer';
 import {
   initialBoard, isLegalMove, applyMove, inCheck, status as gameStatus,
-  positionKey, describeMove, opposite, RED, BLACK,
+  positionKey, describeMove, opposite, perpetualCheckOffender, RED, BLACK,
 } from '../shared/xiangqi.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,7 @@ const ROOM_IDLE_SWEEP_MS = 10 * 60000;
 
 const app = express();
 app.disable('x-powered-by');
+app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -74,6 +76,58 @@ app.get('/stats', (_req, res) => {
   });
 });
 
+// Player feedback -> emailed to the site owner via Gmail SMTP. Credentials
+// and the destination address live only in Render environment variables,
+// never in source (the repo is public), so the address is never exposed.
+// With no credentials configured, feedback is still accepted and logged
+// server-side so nothing is lost while waiting on setup.
+let mailer = null;
+if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
+  mailer = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+  });
+} else {
+  log('feedback: GMAIL_USER/GMAIL_APP_PASSWORD not set -- feedback will be logged only, not emailed');
+}
+
+const FEEDBACK_MAX_LEN = 2000;
+const FEEDBACK_WINDOW_MS = 60 * 60000;
+const FEEDBACK_MAX_PER_WINDOW = 5;
+const feedbackRate = new Map(); // ip -> timestamps[]
+
+app.post('/api/feedback', async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const hits = (feedbackRate.get(ip) || []).filter((t) => now - t < FEEDBACK_WINDOW_MS);
+  if (hits.length >= FEEDBACK_MAX_PER_WINDOW) {
+    return res.status(429).json({ ok: false, message: '提交太频繁，请稍后再试' });
+  }
+  const message = String(req.body?.message || '').trim().slice(0, FEEDBACK_MAX_LEN);
+  const contact = String(req.body?.contact || '').trim().slice(0, 200);
+  if (!message) return res.status(400).json({ ok: false, message: '反馈内容不能为空' });
+
+  hits.push(now);
+  feedbackRate.set(ip, hits);
+  log(`feedback received (${message.length} chars)${contact ? ', contact provided' : ''}`);
+
+  if (mailer) {
+    try {
+      await mailer.sendMail({
+        from: process.env.GMAIL_USER,
+        to: process.env.FEEDBACK_TO || process.env.GMAIL_USER,
+        subject: `[中国象棋反馈] ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+        text: `反馈内容：\n${message}\n\n联系方式：${contact || '（未填写）'}\nIP: ${ip}`,
+      });
+    } catch (err) {
+      log('feedback: email send failed:', err.message, '-- content was:', message.slice(0, 300));
+    }
+  } else {
+    log('feedback (no mailer configured) --', message.slice(0, 500), contact ? `| contact: ${contact}` : '');
+  }
+  res.json({ ok: true });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -104,7 +158,7 @@ function makeRoom(tc, isQuick) {
     board: null,
     turn: RED,
     moves: [],
-    repetition: new Map(), // positionKey -> count
+    posLog: [], // { key, mover, isCheck }[] -- for repetition + perpetual-check detection
     clocks: { [RED]: tc, [BLACK]: tc },
     turnStart: 0,
     flagTimer: null,
@@ -163,7 +217,7 @@ function startGame(room) {
   room.board = initialBoard();
   room.turn = RED;
   room.moves = [];
-  room.repetition = new Map([[positionKey(room.board, RED), 1]]);
+  room.posLog = [{ key: positionKey(room.board, RED), mover: null, isCheck: false }];
   room.clocks = { [RED]: room.tc, [BLACK]: room.tc };
   room.started = true;
   room.over = false;
@@ -224,8 +278,9 @@ function handleMove(room, player, from, to) {
   room.lastActivity = now;
 
   const key = positionKey(room.board, room.turn);
-  const reps = (room.repetition.get(key) || 0) + 1;
-  room.repetition.set(key, reps);
+  const isCheckMove = inCheck(room.board, room.turn);
+  room.posLog.push({ key, mover: player.side, isCheck: isCheckMove });
+  const reps = room.posLog.filter((e) => e.key === key).length;
 
   broadcast(room, {
     type: 'moved',
@@ -236,7 +291,7 @@ function handleMove(room, player, from, to) {
     by: player.side,
     turn: room.turn,
     clocks: currentClocks(room),
-    check: inCheck(room.board, room.turn),
+    check: isCheckMove,
   });
 
   const st = gameStatus(room.board, room.turn);
@@ -245,7 +300,13 @@ function handleMove(room, player, from, to) {
     return endGame(room, opposite(room.turn), st);
   }
   if (reps >= 3) {
-    return endGame(room, null, 'repetition');
+    // Repetition alone isn't automatically a draw: whichever side has been
+    // checking on every one of its moves throughout the repeated span is
+    // committing 长将 (perpetual check) and loses outright.
+    const offender = perpetualCheckOffender(room.posLog, key);
+    return offender
+      ? endGame(room, opposite(offender), 'perpetual-check')
+      : endGame(room, null, 'repetition');
   }
   armFlagTimer(room);
 }
@@ -279,6 +340,11 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, t] of presence) {
     if (now - t > PRESENCE_TTL_MS * 2) presence.delete(id);
+  }
+  for (const [ip, hits] of feedbackRate) {
+    const fresh = hits.filter((t) => now - t < FEEDBACK_WINDOW_MS);
+    if (fresh.length === 0) feedbackRate.delete(ip);
+    else feedbackRate.set(ip, fresh);
   }
   for (const room of rooms.values()) {
     const idle = now - room.lastActivity > ROOM_IDLE_SWEEP_MS;

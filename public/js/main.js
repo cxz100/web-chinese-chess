@@ -4,7 +4,7 @@
  */
 import {
   initialBoard, legalDests, applyMove, undoMove, inCheck, status as gameStatus,
-  positionKey, describeMove, sideOf, opposite, findKing, RED, BLACK,
+  positionKey, describeMove, sideOf, opposite, findKing, perpetualCheckOffender, RED, BLACK,
 } from '/shared/xiangqi.js';
 import { BoardView } from '/js/board.js';
 import { Net } from '/js/net.js';
@@ -25,6 +25,7 @@ const REASON_TEXT = {
   abandon: '对方退出对局',
   repetition: '重复局面',
   agreement: '双方同意和棋',
+  'perpetual-check': '长将判负（不能用重复将军强逼和局）',
 };
 
 // ---------- Global state ----------
@@ -235,16 +236,18 @@ function showResult(winner, reason) {
 function hideOverlays() {
   $('#result-overlay').hidden = true;
   $('#draw-overlay').hidden = true;
+  $('#feedback-overlay').hidden = true;
 }
 
 // ---------- Common game setup ----------
 
 function baseGame(kind, mySide, tc) {
+  const board = initialBoard();
   return {
     kind,
     mySide,
     tc,
-    board: initialBoard(),
+    board,
     turn: RED,
     started: true,
     over: false,
@@ -254,7 +257,7 @@ function baseGame(kind, mySide, tc) {
     clocks: { [RED]: tc, [BLACK]: tc },
     turnStart: Date.now(),
     clockInterval: null,
-    repetition: new Map(),
+    posLog: [{ key: positionKey(board, RED), mover: null, isCheck: false }],
     undoStack: [],
   };
 }
@@ -281,7 +284,6 @@ function startAiGame() {
     : settings.aiSide;
   game = baseGame('ai', mySide, settings.tc);
   game.aiLevel = settings.aiLevel;
-  game.repetition.set(positionKey(game.board, RED), 1);
 
   if (!aiWorker) {
     aiWorker = new Worker('/js/ai-worker.js', { type: 'module' });
@@ -310,7 +312,8 @@ function requestAiMove() {
     timeMs: budget,
     maxDepth: cfg.maxDepth,
     randomness: cfg.randomness,
-    historyKeys: [...game.repetition.keys()],
+    historyKeys: [...new Set(game.posLog.map((e) => e.key))],
+    posLog: game.posLog,
   });
 }
 
@@ -351,7 +354,9 @@ function performLocalMove(from, to) {
   game.selected = -1;
 
   const key = positionKey(game.board, game.turn);
-  game.repetition.set(key, (game.repetition.get(key) || 0) + 1);
+  const isCheckMove = inCheck(game.board, game.turn);
+  game.posLog.push({ key, mover: side, isCheck: isCheckMove });
+  const reps = game.posLog.filter((e) => e.key === key).length;
 
   appendMoveToList(desc, side, Math.ceil(game.moves.length / 2));
   refreshBoard();
@@ -362,11 +367,15 @@ function performLocalMove(from, to) {
     finishAiGame(opposite(game.turn), st);
     return;
   }
-  if (game.repetition.get(key) >= 3) {
-    finishAiGame(null, 'repetition');
+  if (reps >= 3) {
+    // See perpetualCheckOffender: repeating a position isn't automatically
+    // a draw -- a side that checked on every one of its moves throughout
+    // the repeated span loses outright (长将判负).
+    const offender = perpetualCheckOffender(game.posLog, key);
+    finishAiGame(offender ? opposite(offender) : null, offender ? 'perpetual-check' : 'repetition');
     return;
   }
-  if (inCheck(game.board, game.turn)) toast('将军！');
+  if (isCheckMove) toast('将军！');
 
   if (game.turn === game.mySide) {
     setStatus('轮到你走棋');
@@ -392,12 +401,8 @@ function undoAiMove() {
   let undone = 0;
   while (undone < 2 && game.undoStack.length > 0) {
     const m = game.undoStack.pop();
-    // Remove the repetition count added by this move.
-    const key = positionKey(game.board, game.turn);
-    const cnt = game.repetition.get(key);
-    if (cnt > 1) game.repetition.set(key, cnt - 1);
-    else game.repetition.delete(key);
     undoMove(game.board, m.from, m.to, m.captured);
+    game.posLog.pop();
     game.moves.pop();
     game.turn = opposite(game.turn);
     undone++;
@@ -729,6 +734,49 @@ $('#input-room-code').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('#btn-join-room').click();
 });
 
+// ---------- Feedback ----------
+
+function openFeedback() {
+  $('#feedback-text').value = '';
+  $('#feedback-contact').value = '';
+  $('#feedback-status').textContent = '';
+  $('#feedback-overlay').hidden = false;
+  $('#feedback-text').focus();
+}
+
+$('#btn-feedback').addEventListener('click', openFeedback);
+$('#btn-feedback-game').addEventListener('click', openFeedback);
+$('#btn-feedback-cancel').addEventListener('click', () => { $('#feedback-overlay').hidden = true; });
+
+$('#btn-feedback-submit').addEventListener('click', async () => {
+  const message = $('#feedback-text').value.trim();
+  if (!message) {
+    $('#feedback-status').textContent = '请先填写反馈内容';
+    return;
+  }
+  const btn = $('#btn-feedback-submit');
+  btn.disabled = true;
+  $('#feedback-status').textContent = '提交中…';
+  try {
+    const r = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, contact: $('#feedback-contact').value.trim() }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      $('#feedback-status').textContent = '感谢反馈，已发送！';
+      setTimeout(() => { $('#feedback-overlay').hidden = true; }, 1200);
+    } else {
+      $('#feedback-status').textContent = data.message || '提交失败，请稍后重试';
+    }
+  } catch {
+    $('#feedback-status').textContent = '网络错误，请稍后重试';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---------- Presence & online stats ----------
 
 const visitorId = (() => {
@@ -773,6 +821,7 @@ window.__xq = {
   get boardView() { return boardView; },
   net,
   click: (sq) => onSquareClick(sq),
+  performLocalMove: (from, to) => performLocalMove(from, to),
 };
 
 // Resume a PvP session after page refresh.

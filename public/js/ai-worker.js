@@ -4,12 +4,12 @@
  * MVV-LVA + killer move ordering, and a small transposition table.
  *
  * Protocol:
- *   in : { type:'think', board, side, timeMs, maxDepth, randomness, historyKeys }
+ *   in : { type:'think', board, side, timeMs, maxDepth, randomness, historyKeys, posLog }
  *   out: { type:'move', from, to, score, depth }
  */
 import {
   SIZE, RED, opposite, sideOf, rc,
-  pseudoDests, applyMove, undoMove, inCheck, legalMoves, positionKey,
+  pseudoDests, applyMove, undoMove, inCheck, legalMoves, positionKey, perpetualCheckOffender,
 } from '/shared/xiangqi.js';
 
 // ---------- Evaluation ----------
@@ -226,7 +226,7 @@ function search(board, side, depth, alpha, beta, ply) {
   return best;
 }
 
-function findBestMove(board, side, timeMs, maxDepth, randomness) {
+function findBestMove(board, side, timeMs, maxDepth, randomness, posLog) {
   deadline = Date.now() + timeMs;
   nodes = 0;
   stopped = false;
@@ -246,9 +246,20 @@ function findBestMove(board, side, timeMs, maxDepth, randomness) {
     const iter = [];
     for (const m of scored) {
       const captured = applyMove(board, m.from, m.to);
+      const rootKey = positionKey(board, opposite(side));
       let score = -search(board, opposite(side), depth - 1, -Infinity, -alpha, 1);
       // Discourage immediate repetition of real game positions.
-      if (historySet.has(positionKey(board, opposite(side)))) score -= 40;
+      if (historySet.has(rootKey)) score -= 40;
+      // Hard-avoid actually committing the "no perpetual check" foul: if
+      // this move would be the AI's own 3rd repeat of a position where it
+      // has been checking every move, it would lose the game outright, not
+      // draw -- see perpetualCheckOffender. Penalise heavily rather than
+      // exclude, so the AI still has a move if every option is this bad.
+      if (posLog && posLog.length) {
+        const simulated = posLog.concat([{ key: rootKey, mover: side, isCheck: inCheck(board, opposite(side)) }]);
+        const reps = simulated.filter((e) => e.key === rootKey).length;
+        if (reps >= 3 && perpetualCheckOffender(simulated, rootKey) === side) score -= 8000;
+      }
       undoMove(board, m.from, m.to, captured);
       if (stopped) break;
       score += randomness ? Math.floor(rng() * randomness) : 0;
@@ -276,10 +287,10 @@ function findBestMove(board, side, timeMs, maxDepth, randomness) {
 self.onmessage = (e) => {
   const msg = e.data;
   if (msg.type !== 'think') return;
-  const { board, side, timeMs, maxDepth, randomness, historyKeys } = msg;
+  const { board, side, timeMs, maxDepth, randomness, historyKeys, posLog } = msg;
   historySet = new Set(historyKeys || []);
   rng = Math.random;
-  const best = findBestMove(board.slice(), side, timeMs || 1000, maxDepth || 64, randomness || 0);
+  const best = findBestMove(board.slice(), side, timeMs || 1000, maxDepth || 64, randomness || 0, posLog || []);
   if (!best) {
     self.postMessage({ type: 'nomove' });
   } else {

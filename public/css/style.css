@@ -138,6 +138,48 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .pvp-status { margin-top: 16px; text-align: center; color: var(--wood); min-height: 22px; }
 
+.feedback-link {
+  display: block;
+  margin: 32px auto 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.feedback-link:hover { color: var(--wood); }
+
+.feedback-textarea {
+  width: 100%;
+  min-height: 110px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 2px solid var(--bg-elevated);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  resize: vertical;
+  outline: none;
+}
+.feedback-textarea:focus { border-color: var(--accent); }
+
+.feedback-contact {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 2px solid var(--bg-elevated);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+.feedback-contact:focus { border-color: var(--accent); }
+
+.feedback-status { margin-top: 12px; font-size: 13px; color: var(--wood); min-height: 18px; }
+
 /* ===== 对局页 ===== */
 #screen-game { padding: 12px; }
 
