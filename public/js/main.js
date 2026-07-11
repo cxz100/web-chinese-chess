@@ -729,6 +729,39 @@ $('#input-room-code').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('#btn-join-room').click();
 });
 
+// ---------- Presence & online stats ----------
+
+const visitorId = (() => {
+  try {
+    let v = localStorage.getItem('xq_vid');
+    if (!v) {
+      v = crypto.randomUUID();
+      localStorage.setItem('xq_vid', v);
+    }
+    return v;
+  } catch {
+    return crypto.randomUUID();
+  }
+})();
+
+function sendPresence() {
+  fetch(`/presence?id=${visitorId}`, { method: 'POST' }).catch(() => {});
+}
+
+async function refreshOnlineStat() {
+  if (!$('#screen-home').classList.contains('active')) return;
+  try {
+    const r = await fetch('/stats');
+    const s = await r.json();
+    $('#online-stat').textContent = `当前在线 ${s.online} 人 · 进行中对局 ${s.playing} 场`;
+  } catch { /* stat display is best-effort */ }
+}
+
+sendPresence();
+refreshOnlineStat();
+setInterval(sendPresence, 30000);
+setInterval(refreshOnlineStat, 30000);
+
 // ---------- Init ----------
 
 boardView = new BoardView($('#board'), onSquareClick);

@@ -28,6 +28,52 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/shared', express.static(path.join(__dirname, '..', 'shared')));
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
+// Counters since server start (reset on restart/redeploy).
+const stats = {
+  startedAt: Date.now(),
+  totalConnections: 0,
+  gamesStarted: 0,
+};
+
+// Presence heartbeat: every open page pings periodically, so "online" also
+// counts visitors browsing the menu or playing against the AI (who never
+// open a game WebSocket).
+const PRESENCE_TTL_MS = 75000;
+const presence = new Map(); // visitorId -> lastSeen
+const visitorsEver = new Set(); // unique visitor ids since server start
+
+app.post('/presence', (req, res) => {
+  const id = String(req.query.id || '').slice(0, 40);
+  if (id) {
+    presence.set(id, Date.now());
+    visitorsEver.add(id);
+  }
+  res.json({ ok: true });
+});
+
+function onlineCount() {
+  const cutoff = Date.now() - PRESENCE_TTL_MS;
+  let n = 0;
+  for (const t of presence.values()) if (t >= cutoff) n++;
+  return n;
+}
+
+app.get('/stats', (_req, res) => {
+  let playing = 0;
+  for (const room of rooms.values()) {
+    if (room.started && !room.over) playing++;
+  }
+  res.json({
+    online: onlineCount(),
+    playing,
+    waitingQuick: quickQueue.size,
+    uniqueVisitors: visitorsEver.size,
+    totalConnections: stats.totalConnections,
+    gamesStarted: stats.gamesStarted,
+    uptimeMinutes: Math.floor((Date.now() - stats.startedAt) / 60000),
+  });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -113,6 +159,7 @@ function fullState(room, forPlayer) {
 }
 
 function startGame(room) {
+  stats.gamesStarted++;
   room.board = initialBoard();
   room.turn = RED;
   room.moves = [];
@@ -227,9 +274,12 @@ function maybeDeleteRoom(room) {
   }
 }
 
-// Periodic sweep of dead/idle rooms.
+// Periodic sweep of dead/idle rooms and stale presence entries.
 setInterval(() => {
   const now = Date.now();
+  for (const [id, t] of presence) {
+    if (now - t > PRESENCE_TTL_MS * 2) presence.delete(id);
+  }
   for (const room of rooms.values()) {
     const idle = now - room.lastActivity > ROOM_IDLE_SWEEP_MS;
     const anyConnected = room.players.some((p) => p.ws);
@@ -243,6 +293,7 @@ setInterval(() => {
 }, 60000).unref();
 
 wss.on('connection', (ws) => {
+  stats.totalConnections++;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 

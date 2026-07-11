@@ -49,6 +49,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 700;
 }
 .subtitle { color: var(--text-dim); margin-top: 10px; letter-spacing: 2px; }
+.online-stat { color: var(--wood); margin-top: 12px; font-size: 14px; min-height: 18px; }
 
 .mode-tabs {
   display: flex;
