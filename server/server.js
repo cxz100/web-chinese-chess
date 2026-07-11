@@ -8,6 +8,7 @@ import express from 'express';
 import http from 'http';
 import crypto from 'crypto';
 import path from 'path';
+import dns from 'dns';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import nodemailer from 'nodemailer';
@@ -15,6 +16,12 @@ import {
   initialBoard, isLegalMove, applyMove, inCheck, status as gameStatus,
   positionKey, describeMove, opposite, perpetualCheckOffender, RED, BLACK,
 } from '../shared/xiangqi.js';
+
+// Some hosts (Render's free tier included) advertise IPv6 in DNS but can't
+// actually route outbound IPv6 traffic, so an SMTP connection to Gmail
+// resolves to an AAAA address and then fails with ENETUNREACH. Prefer IPv4
+// resolution process-wide to avoid that trap.
+dns.setDefaultResultOrder('ipv4first');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -84,7 +91,10 @@ app.get('/stats', (_req, res) => {
 let mailer = null;
 if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
   mailer = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    family: 4, // belt-and-suspenders alongside dns.setDefaultResultOrder above
     auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
   });
 } else {
