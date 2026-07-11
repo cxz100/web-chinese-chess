@@ -41,6 +41,11 @@ let boardView = null;
 let aiWorker = null;
 const net = new Net();
 
+// Remembers an in-progress quick-match request so it can be re-sent if the
+// connection drops while waiting in the queue (the server silently removes
+// disconnected players from the queue).
+let pvpIntent = null; // { type: 'quick', tc }
+
 // ---------- Screens ----------
 
 function showScreen(id) {
@@ -415,6 +420,11 @@ function pvpStatus(text) {
   $('#pvp-status').textContent = text;
 }
 
+function setMatching(active) {
+  $('#btn-cancel-match').hidden = !active;
+  $('#btn-quick-match').disabled = active;
+}
+
 function startPvpGame(mySide, tc, fromState) {
   game = baseGame('pvp', mySide, tc);
   if (fromState) {
@@ -462,11 +472,14 @@ function bindNetHandlers() {
   });
 
   net.on('start', (msg) => {
+    pvpIntent = null;
     pvpStatus('');
+    setMatching(false);
     startPvpGame(msg.side, msg.tc);
   });
 
   net.on('state', (msg) => {
+    if (!msg.board) return; // game not started yet, nothing to restore
     // Rejoined an existing game (reconnect / page refresh).
     startPvpGame(msg.side, msg.tc, msg);
     // Server clocks are authoritative; active side's clock resumes from now.
@@ -530,7 +543,16 @@ function bindNetHandlers() {
   });
 
   net.on('error', (msg) => {
-    if (msg.code === 'ROOM_GONE') return; // stale session, ignore
+    if (msg.code === 'ROOM_GONE') {
+      // Our old room vanished (e.g. we were dropped from the quick-match
+      // queue while disconnected, or the server restarted). If we were
+      // queueing, just queue again.
+      if (pvpIntent && pvpIntent.type === 'quick' && (!game || game.over)) {
+        net.send({ type: 'quick', tc: pvpIntent.tc });
+        pvpStatus('正在匹配对手…');
+      }
+      return;
+    }
     if ($('#screen-home').classList.contains('active')) {
       pvpStatus(msg.message || '出错了');
     } else {
@@ -541,12 +563,18 @@ function bindNetHandlers() {
   net.on('_close', () => {
     if (game && game.kind === 'pvp' && !game.over) {
       setStatus('连接已断开，正在重连…');
+    } else if (pvpIntent) {
+      pvpStatus('连接中断，正在重连…');
     }
   });
 
   net.on('_open', () => {
     if (game && game.kind === 'pvp' && !game.over) {
       setStatus('已重新连接');
+    } else if (pvpIntent && pvpIntent.type === 'quick' && !net.getSession()) {
+      // Reconnected with no room to rejoin: re-enter the queue.
+      net.send({ type: 'quick', tc: pvpIntent.tc });
+      pvpStatus('正在匹配对手…');
     }
   });
 }
@@ -581,15 +609,27 @@ function onSquareClick(sq) {
 // ---------- Buttons ----------
 
 $('#btn-start-ai').addEventListener('click', () => {
+  pvpIntent = null;
   net.disconnect();
+  setMatching(false);
   startAiGame();
 });
 
 $('#btn-quick-match').addEventListener('click', () => {
   net.clearSession();
   net.connect();
+  pvpIntent = { type: 'quick', tc: settings.tc };
   pvpStatus('正在匹配对手…');
+  setMatching(true);
   net.sendWhenReady({ type: 'quick', tc: settings.tc });
+});
+
+$('#btn-cancel-match').addEventListener('click', () => {
+  pvpIntent = null;
+  net.send({ type: 'leave' });
+  net.disconnect();
+  pvpStatus('已取消匹配');
+  setMatching(false);
 });
 
 $('#btn-create-room').addEventListener('click', () => {
@@ -659,8 +699,10 @@ function goHome() {
   }
   net.disconnect();
   game = null;
+  pvpIntent = null;
   hideOverlays();
   pvpStatus('');
+  setMatching(false);
   showScreen('#screen-home');
 }
 
@@ -696,6 +738,7 @@ bindNetHandlers();
 window.__xq = {
   get game() { return game; },
   get boardView() { return boardView; },
+  net,
   click: (sq) => onSquareClick(sq),
 };
 

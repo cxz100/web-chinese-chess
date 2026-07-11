@@ -45,6 +45,10 @@ function makeCode() {
   return code;
 }
 
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
+
 function makeRoom(tc, isQuick) {
   const room = {
     code: makeCode(),
@@ -138,6 +142,7 @@ function armFlagTimer(room) {
 }
 
 function endGame(room, winner, reason) {
+  log(`room ${room.code}: game over, winner=${winner || 'draw'}, reason=${reason}`);
   room.over = true;
   room.result = { winner, reason };
   clearTimeout(room.flagTimer);
@@ -292,6 +297,7 @@ wss.on('connection', (ws) => {
         const waiting = waitingCode ? rooms.get(waitingCode) : null;
         if (waiting && waiting.players.length === 1 && waiting.players[0].ws) {
           quickQueue.delete(tc);
+          log(`quick match: paired into room ${waiting.code} (tc=${tc})`);
           joinAsSecond(waiting);
         } else {
           room = makeRoom(tc, true);
@@ -299,6 +305,7 @@ wss.on('connection', (ws) => {
           player = { token: crypto.randomUUID(), side, ws, graceTimer: null };
           room.players.push(player);
           quickQueue.set(tc, room.code);
+          log(`quick match: waiting in room ${room.code} (tc=${tc})`);
           send(ws, { type: 'waiting', code: room.code, token: player.token, tc });
         }
         break;
@@ -317,9 +324,21 @@ wss.on('connection', (ws) => {
         p.ws = ws;
         room = r;
         player = p;
-        send(ws, fullState(r, p));
-        const other = r.players.find((pl) => pl !== p);
-        if (other) send(other.ws, { type: 'opponentReconnected' });
+        if (!r.started) {
+          // Still waiting for an opponent: confirm the queue/room instead of
+          // sending a (nonexistent) game state.
+          send(ws, {
+            type: r.isQuick ? 'waiting' : 'created',
+            code: r.code,
+            token: p.token,
+            side: p.side,
+            tc: r.tc,
+          });
+        } else {
+          send(ws, fullState(r, p));
+          const other = r.players.find((pl) => pl !== p);
+          if (other) send(other.ws, { type: 'opponentReconnected' });
+        }
         break;
       }
 
@@ -394,6 +413,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (room && player && player.ws === ws) {
+      log(`room ${room.code}: player (${player.side}) disconnected, started=${room.started}, over=${room.over}`);
       if (!room.started || room.over) {
         room.players = room.players.filter((p) => p !== player);
         if (quickQueue.get(room.tc) === room.code && room.players.length === 0) quickQueue.delete(room.tc);
