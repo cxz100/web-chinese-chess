@@ -88,17 +88,41 @@ app.get('/stats', (_req, res) => {
 // never in source (the repo is public), so the address is never exposed.
 // With no credentials configured, feedback is still accepted and logged
 // server-side so nothing is lost while waiting on setup.
-let mailer = null;
-if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-  mailer = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
+const feedbackConfigured = !!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
+if (!feedbackConfigured) {
+  log('feedback: GMAIL_USER/GMAIL_APP_PASSWORD not set -- feedback will be logged only, not emailed');
+}
+
+// Render's outbound network can't route the IPv6 address Node resolves for
+// smtp.gmail.com (fails with ENETUNREACH) even with DNS ordering set to
+// prefer IPv4 -- nodemailer's SMTP connection does its own resolution and
+// doesn't honor that global setting. Resolve to a literal IPv4 address
+// ourselves and connect to that directly (TLS servername kept as the real
+// hostname so Gmail's certificate still validates).
+async function sendFeedbackEmail(message, contact, ip) {
+  let host = 'smtp.gmail.com';
+  try {
+    // dns.lookup() goes through the OS resolver (getaddrinfo), which works
+    // in more restricted/sandboxed network setups than dns.resolve4()'s
+    // direct DNS queries -- more likely to succeed on a locked-down PaaS.
+    const { address } = await dns.promises.lookup('smtp.gmail.com', { family: 4 });
+    if (address) host = address;
+  } catch (err) {
+    log('feedback: IPv4 lookup for smtp.gmail.com failed, trying hostname directly:', err.message);
+  }
+  const transport = nodemailer.createTransport({
+    host,
     port: 465,
     secure: true,
-    family: 4, // belt-and-suspenders alongside dns.setDefaultResultOrder above
+    tls: { servername: 'smtp.gmail.com' },
     auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
   });
-} else {
-  log('feedback: GMAIL_USER/GMAIL_APP_PASSWORD not set -- feedback will be logged only, not emailed');
+  await transport.sendMail({
+    from: process.env.GMAIL_USER,
+    to: process.env.FEEDBACK_TO || process.env.GMAIL_USER,
+    subject: `[中国象棋反馈] ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+    text: `反馈内容：\n${message}\n\n联系方式：${contact || '（未填写）'}\nIP: ${ip}`,
+  });
 }
 
 const FEEDBACK_MAX_LEN = 2000;
@@ -121,14 +145,10 @@ app.post('/api/feedback', async (req, res) => {
   feedbackRate.set(ip, hits);
   log(`feedback received (${message.length} chars)${contact ? ', contact provided' : ''}`);
 
-  if (mailer) {
+  if (feedbackConfigured) {
     try {
-      await mailer.sendMail({
-        from: process.env.GMAIL_USER,
-        to: process.env.FEEDBACK_TO || process.env.GMAIL_USER,
-        subject: `[中国象棋反馈] ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
-        text: `反馈内容：\n${message}\n\n联系方式：${contact || '（未填写）'}\nIP: ${ip}`,
-      });
+      await sendFeedbackEmail(message, contact, ip);
+      log('feedback: email sent successfully');
     } catch (err) {
       log('feedback: email send failed:', err.message, '-- content was:', message.slice(0, 300));
     }
